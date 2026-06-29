@@ -1,199 +1,70 @@
-# renomeadorcomprovantes
-Ler arquivos de pagamentos e renomear 
-# 📄 Renomeador Inteligente de Comprovantes Bancários
+# 📑 Relatório Técnico: Renomeador de Comprovantes Inteligente v2.1
 
-Ferramenta Python para renomear automaticamente comprovantes bancários em PDF, extraindo informações relevantes e organizando-os de forma inteligente.
+## 1. Visão Geral
+Sistema Fullstack desenvolvido para processar lotes de comprovantes bancários (PDF), realizar o recorte de páginas, extração de metadados via OCR/Texto, classificação financeira (Pagamentos vs. Transferências Interunidades) e organização cronológica.
 
-## 🎯 Funcionalidades
+## 2. Stack Tecnológica
+Backend: Python 3.10+ (FastAPI).
+Extração: pdfplumber (Texto) e PyPDF2 (Manipulação de arquivos).
+Persistência: SQLite com ORM SQLAlchemy.
+Frontend: React 18 + TypeScript + Vite.
+Comunicação: REST API (JSON).
 
-- ✅ Renomeia comprovantes no formato: `DESCRICAO_VALOR_DATA.pdf`
-- 🏦 Suporta múltiplos tipos de comprovantes:
-  - **PIX** (Sicredi)
-  - **Boletos** (Sicredi)
-  - **Contas de Consumo** (Sicredi)
-  - **Transferências Bradesco**
-  - **DARF** (Sicredi)
-- 📁 Organiza arquivos em pastas por data
-- 🔍 Extração inteligente de dados usando OCR em PDFs
+## 3. Arquitetura de Dados e Arquivos
+O sistema utiliza uma estrutura de pastas na raiz do projeto para persistência física:
+/data/app.db: Banco de dados relacional.
+/data/processados/: Repositório de arquivos renomeados (AAAA-MM-DD_BANCO_ID_VALOR.pdf).
+/data/uploads/: Buffer temporário de upload (limpo automaticamente).
+Modelo de Dados (Comprovante):
+Colunas principais: bank, source_path (Conta Origem), dest_account (Unidade Destino), amount, date (ISO), comprovante_type.
 
-## 📋 Requisitos
+## 4. Inteligência de Processamento (pdf_processing.py)
+O motor de extração possui lógicas específicas para três grandes bancos:
+A. Sicredi
+Tipos: Boletos, Tributos (IPTU, ISS, ICMS), Consumo (VIVO, etc) e DARF.
+Diferencial: Captura do número do documento DARF em layouts variáveis e limpeza de sufixos como "COD BARRAS".
+B. Bradesco (Net Empresa / Office Banking)
+Tipos: Boletos e Tributos Estaduais/Municipais (DAE, DARE, DAR).
+Diferencial: "Scanner de Órgãos" que identifica a UF (BA, SP, MT, DF, CE) e Prefeituras mesmo quando o rótulo está desalinhado no PDF.
+C. Banco do Brasil (SISBB)
+Tipos: Pagamentos (IPVA) e Transferências entre filiais.
+Diferencial: Ignora o cabeçalho de impressão (data de emissão) para capturar a data real da transação. Detecta transferências para o CNPJ radical 04.251.333.
 
-- Python 3.7 ou superior
-- pip (gerenciador de pacotes Python)
+## 5. Funcionalidades do Dashboard
+Filtros Multi-nível: Banco, Unidade (Conta), Ano, Mês e Dia.
+Modo Pagamentos: Agrupamento por lote diário (Cards) com função de Download em ZIP gerado em tempo real.
+Modo Transferências: Tabela de conciliação com mapeamento "De -> Para" baseado no UNIDADES_MAP (traduzindo contas para nomes como "Aracaju", "Matriz", etc).
+Trava de Duplicidade: O sistema impede o reprocessamento da mesma transação, verificando a combinação de Banco+Conta+Data+Valor+Identificador.
 
-## 🚀 Instalação
+### 🛠 Guia de Comit e Deploy (Git)
+Para subir o projeto para o GitHub e posteriormente para o servidor:
 
-1. Clone o repositório:
-```bash
-git clone https://github.com/seu-usuario/renomeador-comprovantes.git
-cd renomeador-comprovantes
-```
+# 1. Preparar o .gitignore
+Certifique-se de ignorar os dados sensíveis e os arquivos processados:
+code
+Text
+.venv/
+__pycache__/
+data/*.db
+data/processados/*.pdf
+data/uploads/*.pdf
+node_modules/
+dist/
+.env
 
-2. Instale as dependências:
-```bash
-pip install -r requirements.txt
-```
+# 2. Comandos para o Git (Terminal)
+code
+Bash
+git init
+git add .
+git commit -m "feat: implementacao completa multibanco, filtros avancados e gestao de transferencias"
+git branch -M main
+git remote add origin https://github.com/usuario/renomeadorcomprovantes.git
+git push -u origin main
 
-## 📦 Dependências
-
-O projeto utiliza as seguintes bibliotecas:
-
-- `pdfplumber` - Extração de texto de PDFs
-- `PyPDF2` - Manipulação de arquivos PDF
-
-## 💻 Uso
-
-### Uso Básico
-
-```bash
-python renomeador_comprovantes.py
-```
-
-O script irá:
-1. Processar todos os arquivos PDF na pasta atual
-2. Identificar o tipo de comprovante
-3. Extrair as informações relevantes
-4. Renomear o arquivo seguindo o padrão estabelecido
-5. Organizar em pastas por data (se configurado)
-
-### Exemplos de Saída
-
-**PIX:**
-```
-PENSAO_ALIMENTICIA_AP511704_613,54_09_jun.pdf
-```
-
-**Boleto:**
-```
-INSTALACAO_0150774922_REF_MAI2_237,20_09_jun.pdf
-```
-
-**Conta de Consumo:**
-```
-CONTA_LUZ_MAIO_150,30_15_mai.pdf
-```
-
-**Bradesco:**
-```
-TRANSFERENCIA_BANCARIA_1500,00_15_mar.pdf
-```
-
-**DARF:**
-```
-DARF_123456789_1234,56_15_mar.pdf
-```
-
-## 🏗️ Estrutura do Projeto
-
-```
-renomeador-comprovantes/
-│
-├── renomeador_comprovantes.py  # Script principal
-├── requirements.txt            # Dependências do projeto
-├── README.md                   # Documentação
-├── LICENSE                     # Licença do projeto
-└── .gitignore                 # Arquivos ignorados pelo Git
-```
-
-## 🔧 Como Funciona
-
-### 1. Identificação do Tipo de Comprovante
-
-O script analisa o texto do PDF e identifica o tipo baseado em palavras-chave:
-
-- **DARF**: "comprovante de pagamento de darf"
-- **Bradesco**: "bradesco", "data de débito", "data de crédito"
-- **PIX**: "comprovante de pagamento pix"
-- **Boleto**: "razão social do beneficiário"
-- **Consumo**: "nome da empresa"
-
-### 2. Extração de Dados
-
-Para cada tipo de comprovante, o script extrai:
-
-#### PIX
-- Descrição: Linha após "Comprovante de Pagamento Pix"
-- Valor: Campo "Valor R$"
-- Data: Campo "Realizado em"
-
-#### Boleto
-- Descrição: Razão social do beneficiário
-- Valor: Valor do documento
-- Data: Data de vencimento ou pagamento
-
-#### Bradesco
-- Descrição: Campo "Descrição"
-- Valor: Campo "Valor Total"
-- Data: Campo "Data de débito" ou "Data de crédito"
-
-#### DARF
-- Descrição: "DARF_" + Número do Documento
-- Valor: Campo "Valor Total (R$)"
-- Data: Campo "Data do Pagamento"
-
-### 3. Formatação do Nome
-
-O nome final segue o padrão:
-```
-DESCRICAO_VALOR_DATA.pdf
-```
-
-Onde:
-- `DESCRICAO`: Texto limpo, sem caracteres especiais, palavras separadas por underscore
-- `VALOR`: Formato numérico com vírgula (ex: 1.234,56)
-- `DATA`: Formato DD_MMM (ex: 15_mar)
-
-## 🐛 Depuração
-
-O script inclui modo de depuração detalhado que exibe:
-- Linhas extraídas do PDF
-- Processo de identificação de campos
-- Valores encontrados em cada etapa
-- Resultado final da extração
-
-Para habilitar, o modo debug já está ativo nas funções `extrair_dados_*`.
-
-## 🤝 Contribuindo
-
-Contribuições são bem-vindas! Sinta-se à vontade para:
-
-1. Fazer fork do projeto
-2. Criar uma branch para sua feature (`git checkout -b feature/NovaFuncionalidade`)
-3. Commit suas mudanças (`git commit -m 'Adiciona nova funcionalidade'`)
-4. Push para a branch (`git push origin feature/NovaFuncionalidade`)
-5. Abrir um Pull Request
-
-## 📝 TODO / Roadmap
-
-- [ ] Adicionar suporte a mais bancos
-- [ ] Implementar interface gráfica (GUI)
-- [ ] Adicionar testes automatizados
-- [ ] Suporte a processamento em lote de múltiplas pastas
-- [ ] Opção de configuração via arquivo JSON
-- [ ] Backup automático antes de renomear
-- [ ] Geração de relatório de processamento
-
-## ⚠️ Avisos Importantes
-
-- Sempre faça backup dos seus arquivos antes de usar o script
-- Teste com alguns arquivos primeiro antes de processar em lote
-- Verifique se os PDFs não estão protegidos por senha
-- O script funciona melhor com PDFs que contêm texto extraível (não apenas imagens)
-
-## 📄 Licença
-
-Este projeto está sob a licença MIT. Veja o arquivo [LICENSE](LICENSE) para mais detalhes.
-
-## 👤 Autor
-
-Seu Nome - [@seu_usuario](https://github.com/seu-usuario)
-
-## 🙏 Agradecimentos
-
-- Comunidade Python
-- Desenvolvedores das bibliotecas pdfplumber e PyPDF2
-- Todos que contribuíram com feedback e sugestões
-
----
-
-**Nota**: Este projeto é fornecido "como está", sem garantias. Use por sua conta e risco.
+# 3. Instruções para o Servidor Ubuntu (TI)
+Backend: Criar serviço Systemd para o Gunicorn rodando na porta 8000.
+Frontend: Gerar build (npm run build) e servir os arquivos estáticos via Nginx.
+Permissões: O usuário do Nginx (www-data) deve ter permissão de escrita na pasta /data.
+Database: Na primeira execução, o SQLAlchemy criará automaticamente o esquema do banco.
+Observação: O mapeamento das unidades está centralizado no frontend (UNIDADES_MAP), permitindo alteração rápida de nomes de filiais sem necessidade de mexer no banco de dados.

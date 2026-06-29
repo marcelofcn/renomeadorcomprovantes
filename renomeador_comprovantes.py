@@ -12,11 +12,24 @@ Formatos suportados (exemplos):
 - DARF: DARF_123456789_1.234,56_15_mar.pdf (Número do Documento + Valor Total + Data do Pagamento)
 """
 
+import argparse
 import os
 import re
+import unicodedata
 from pathlib import Path
 import pdfplumber  # type: ignore
 from PyPDF2 import PdfReader, PdfWriter  # type: ignore
+
+
+def normalizar_acentos(texto):
+    """Remove acentos e caracteres especiais, preservando a legibilidade."""
+    # Normalizar Unicode (NFD = decomposição)
+    nfd = unicodedata.normalize('NFD', texto)
+    # Remover diacríticos
+    sem_acentos = ''.join(char for char in nfd if unicodedata.category(char) != 'Mn')
+    # Manter apenas letras, números e espaços
+    limpo = re.sub(r'[^a-zA-Z0-9\s]', '', sem_acentos)
+    return limpo
 
 
 def identificar_tipo_comprovante(texto):
@@ -35,7 +48,7 @@ def identificar_tipo_comprovante(texto):
     if "comprovante da pagamento de darf" in texto_lower or "comprovante de pagamento de darf" in texto_lower:
         return "darf"
     # Identificando comprovante Bradesco
-    elif "bradesco" in texto_lower or "data de débito" in texto_lower or "data de crédito" in texto_lower:
+    elif "bradesco" in texto_lower or "data de débito" in texto_lower or "data de crédito" in texto_lower or "comprovante de transação bancária" in texto_lower:
         return "bradesco"
     # Identificando comprovante de pagamento PIX
     elif "comprovante de pagamento pix" in texto_lower:
@@ -51,6 +64,7 @@ def identificar_tipo_comprovante(texto):
 def extrair_dados_bradesco(texto):
     """
     Função específica para extrair dados de comprovantes Bradesco.
+    Suporta: utilidades (água/luz), impostos (DARF), boletos.
     
     Args:
         texto (str): Texto extraído do PDF
@@ -60,69 +74,148 @@ def extrair_dados_bradesco(texto):
     """
     linhas = texto.splitlines()
     
-    print("\n[DEPURAÇÃO BRADESCO] Linhas extraídas:")
-    for i, linha in enumerate(linhas):
-        print(f"Linha {i + 1}: '{linha.strip()}'")
-    
     descricao = "sem_descricao"
     valor = "0.00"
     data = ""
     
-    # Procurar pela descrição
+    # ============ EXTRAÇÃO DE DESCRIÇÃO ============
+    # 1. Procurar por "Descrição:" (DARF/Impostos)
     for i, linha in enumerate(linhas):
-        linha_strip = linha.strip()
-        # Procurar por "Descrição:" ou "Descricao:"
-        if re.match(r"descri[cç][aã]o\s*:?", linha_strip, re.I):
-            print(f"[DEPURAÇÃO BRADESCO] Encontrou 'Descrição' na linha {i + 1}")
-            
-            # A descrição pode estar na mesma linha ou na próxima
-            descricao_match = re.search(r"descri[cç][aã]o\s*:?\s*(.+)", linha_strip, re.I)
+        if re.search(r"descri[cç][aã]o\s*:?", linha, re.I):
+            descricao_match = re.search(r"descri[cç][aã]o\s*:?\s*(.+)", linha, re.I)
             if descricao_match and descricao_match.group(1).strip():
                 descricao = descricao_match.group(1).strip()
-                print(f"[DEPURAÇÃO BRADESCO] Descrição encontrada na mesma linha: '{descricao}'")
-            elif i + 1 < len(linhas):
-                # Verificar próxima linha
-                proxima_linha = linhas[i + 1].strip()
-                if proxima_linha and not re.match(r"(valor|data|r\$)", proxima_linha, re.I):
-                    descricao = proxima_linha
-                    print(f"[DEPURAÇÃO BRADESCO] Descrição encontrada na linha seguinte: '{descricao}'")
-            break
+                break
     
-    # Procurar pelo "Valor Total" (campo específico do Bradesco)
-    for linha in linhas:
-        # Padrões para encontrar "Valor Total"
-        valor_match = re.search(r"valor\s+total\s*:?\s*r?\$?\s*([\d.,]+)", linha, re.I)
-        if valor_match:
-            valor_raw = valor_match.group(1)
-            # Converter para formato float
-            if ',' in valor_raw:
-                valor = valor_raw.replace('.', '').replace(',', '.')
-            else:
-                valor = valor_raw
-            print(f"[DEPURAÇÃO BRADESCO] Valor Total encontrado: '{valor_raw}' -> '{valor}'")
-            break
+    # 2. Se não achou, procurar por "Nome Fantasia", "Beneficiário Final"
+    if descricao == "sem_descricao":
+        for i, linha in enumerate(linhas):
+            if re.search(r"nome\s+fantasia|benefici[aá]rio\s+final", linha, re.I):
+                for j in range(i + 1, len(linhas)):
+                    proxima = linhas[j].strip()
+                    if proxima and not re.search(r"cpf|cnpj|data|valor", proxima, re.I):
+                        descricao = proxima
+                        break
+                if descricao != "sem_descricao":
+                    break
     
-    # Procurar pela "Data de débito" ou "Data de crédito"
+    # 3. Se não achou, procurar por tipos de serviço (Água, Luz, etc.)
+    if descricao == "sem_descricao":
+        for linha in linhas:
+            if re.search(r"água|luz|telefone|gás|gas", linha, re.I) and not re.search(r"valor|data|r\$", linha, re.I):
+                descricao = linha.strip()
+                break
+    
+    # 4. Se não achou, procurar por Concessionária
+    if descricao == "sem_descricao":
+        for linha in linhas:
+            if re.search(r"concession[aá]ria\s*:?", linha, re.I):
+                concessionaria_match = re.search(r"concession[aá]ria\s*:?\s*(.+)", linha, re.I)
+                if concessionaria_match:
+                    descricao = concessionaria_match.group(1).strip()
+                    break
+    
+    # 5. Fallback: pegar primeira linha relevante
+    if descricao == "sem_descricao":
+        for linha in linhas:
+            linha_strip = linha.strip()
+            if linha_strip and not re.search(r"^(comprovante|data|agência|banco|conta|código|referência|autenticação|n°|n\u00ba)", linha_strip, re.I):
+                descricao = linha_strip
+                break
+    
+    # ============ EXTRAÇÃO DE VALOR ============
+    # 1. Procurar por "Valor total:" (mais específico)
     for linha in linhas:
-        data_match = re.search(r"data\s+de\s+(d[ée]bito|cr[ée]dito)\s*:?\s*(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})", linha, re.I)
+        if re.search(r"valor\s+total\s*:?", linha, re.I):
+            valor_match = re.search(r"r?\$?\s*([\d.,]+)", linha, re.I)
+            if valor_match:
+                valor_raw = valor_match.group(1).strip()
+                if re.search(r'\d+[.,]\d+', valor_raw) or re.search(r'\d{3,}', valor_raw):
+                    if ',' in valor_raw:
+                        valor = valor_raw.replace('.', '').replace(',', '.')
+                    else:
+                        valor = valor_raw
+                    try:
+                        if float(valor) > 1.0:
+                            break
+                    except ValueError:
+                        valor = "0.00"
+    
+    # 2. Procurar por "Valor do pagamento:" (segunda opção)
+    if valor == "0.00":
+        for linha in linhas:
+            if re.search(r"valor\s+do\s+pagamento\s*:?", linha, re.I):
+                valor_match = re.search(r"r?\$?\s*([\d.,]+)", linha, re.I)
+                if valor_match:
+                    valor_raw = valor_match.group(1).strip()
+                    if re.search(r'\d+[.,]\d+', valor_raw):
+                        if ',' in valor_raw:
+                            valor = valor_raw.replace('.', '').replace(',', '.')
+                        else:
+                            valor = valor_raw
+                        try:
+                            if float(valor) > 1.0:
+                                break
+                        except ValueError:
+                            valor = "0.00"
+    
+    # 3. Procurar por "Valor principal:" (terceira opção)
+    if valor == "0.00":
+        for linha in linhas:
+            if re.search(r"valor\s+principal\s*:?", linha, re.I):
+                valor_match = re.search(r"r?\$?\s*([\d.,]+)", linha, re.I)
+                if valor_match:
+                    valor_raw = valor_match.group(1).strip()
+                    if re.search(r'\d+[.,]\d+', valor_raw):
+                        if ',' in valor_raw:
+                            valor = valor_raw.replace('.', '').replace(',', '.')
+                        else:
+                            valor = valor_raw
+                        try:
+                            if float(valor) > 1.0:
+                                break
+                        except ValueError:
+                            valor = "0.00"
+    
+    # 4. Procurar por padrão genérico "Valor R$"
+    if valor == "0.00":
+        for linha in linhas:
+            if re.search(r"valor\s+r?\$", linha, re.I):
+                valor_match = re.search(r"r?\$?\s*([\d.,]+)", linha, re.I)
+                if valor_match:
+                    valor_raw = valor_match.group(1).strip()
+                    if re.search(r'\d+[.,]\d+', valor_raw):
+                        if ',' in valor_raw:
+                            valor = valor_raw.replace('.', '').replace(',', '.')
+                        else:
+                            valor = valor_raw
+                        try:
+                            if float(valor) > 1.0:
+                                break
+                        except ValueError:
+                            valor = "0.00"
+    
+    # ============ EXTRAÇÃO DE DATA ============
+    # Procurar por "Data de débito:", "Data de vencimento:", "Data da operação:"
+    for linha in linhas:
+        data_match = re.search(r"data\s+(?:de|do|da)\s+(?:d[ée]bito|vencimento|op[eé]ração|operacao)\s*:?\s*(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})", linha, re.I)
         if data_match:
-            _, dia, mes, ano = data_match.groups()
+            dia, mes, ano = data_match.groups()
             meses = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 
                     'jul', 'ago', 'set', 'out', 'nov', 'dez']
             try:
                 mes_num = int(mes)
                 if 1 <= mes_num <= 12:
                     data = f"{dia.zfill(2)}_{meses[mes_num-1]}"
-                    print(f"[DEPURAÇÃO BRADESCO] Data encontrada: '{data_match.group()}' -> '{data}'")
                     break
             except:
                 continue
     
     # Limpar e formatar a descrição
-    descricao = re.sub(r'[^a-zA-Z0-9\s_]', '', descricao)
-    descricao = "_".join(descricao.split())
-    
-    print(f"[DEPURAÇÃO BRADESCO] Resultado final - Descrição: '{descricao}', Valor: '{valor}', Data: '{data}'")
+    descricao = normalizar_acentos(descricao)
+    descricao = "_".join(descricao.split()).upper()
+    if not descricao or descricao == "":
+        descricao = "SEM_DESCRICAO"
     
     return descricao, valor, data
 
@@ -524,15 +617,52 @@ def processar_pdf(caminho_pdf):
         return None
 
 
+def mover_para_processados(arquivo_path):
+    """
+    Move um arquivo para a pasta data/processados/.
+    
+    Args:
+        arquivo_path (Path): Caminho do arquivo a mover
+        
+    Returns:
+        bool: True se movido com sucesso, False caso contrário
+    """
+    try:
+        # Definir pasta de processados
+        pasta_processados = Path(__file__).resolve().parent / "data" / "processados"
+        pasta_processados.mkdir(parents=True, exist_ok=True)
+        
+        # Novo caminho no diretório processados
+        novo_caminho = pasta_processados / arquivo_path.name
+        
+        # Evitar sobrescrever arquivos
+        contador = 1
+        while novo_caminho.exists():
+            nome_base = arquivo_path.stem
+            novo_caminho = pasta_processados / f"{nome_base}_{contador}.pdf"
+            contador += 1
+        
+        # Mover arquivo
+        arquivo_path.rename(novo_caminho)
+        print(f"📂 Movido para: {novo_caminho}")
+        return True
+    except Exception as e:
+        print(f"❌ Erro ao mover arquivo: {str(e)}")
+        return False
+
+
 def renomear_arquivos_na_pasta(pasta="."):
     """
-    Renomeia todos os arquivos PDF na pasta especificada.
+    Renomeia todos os arquivos PDF na pasta especificada e move para processados.
     
     Args:
         pasta (str): Caminho da pasta a processar (padrão: pasta atual)
     """
     pasta_path = Path(pasta)
-    arquivos_pdf = list(pasta_path.glob("*.pdf"))
+    arquivos_pdf = [
+        arquivo for arquivo in pasta_path.iterdir()
+        if arquivo.is_file() and arquivo.suffix.lower() == ".pdf"
+    ]
     
     if not arquivos_pdf:
         print("Nenhum arquivo PDF encontrado na pasta.")
@@ -556,7 +686,7 @@ def renomear_arquivos_na_pasta(pasta="."):
         if nome_sugerido:
             novo_caminho = arquivo.parent / nome_sugerido
             
-            # Evitar sobrescrever arquivos
+            # Evitar sobrescrever arquivos na pasta temporária
             contador = 1
             while novo_caminho.exists():
                 nome_base = nome_sugerido.replace('.pdf', '')
@@ -564,11 +694,20 @@ def renomear_arquivos_na_pasta(pasta="."):
                 contador += 1
             
             try:
+                # Renomear na pasta original
                 arquivo.rename(novo_caminho)
                 print(f"✅ Renomeado com sucesso!")
                 print(f"   De: {nome_original}")
-                print(f"   Para: {novo_caminho.name}\n")
-                processados += 1
+                print(f"   Para: {novo_caminho.name}")
+                
+                # Mover para pasta processados
+                if mover_para_processados(novo_caminho):
+                    processados += 1
+                else:
+                    # Se falhar ao mover, renomear de volta
+                    novo_caminho.rename(arquivo.parent / nome_original)
+                    falhas += 1
+                print()
             except Exception as e:
                 print(f"❌ Erro ao renomear: {str(e)}\n")
                 falhas += 1
@@ -586,12 +725,21 @@ def renomear_arquivos_na_pasta(pasta="."):
 
 def main():
     """Função principal"""
+    parser = argparse.ArgumentParser(description="Renomeador Inteligente de Comprovantes")
+    parser.add_argument(
+        "--folder",
+        type=str,
+        default=".",
+        help="Caminho da pasta que contém os PDFs (padrão: pasta atual)"
+    )
+    args = parser.parse_args()
+
     print("\n" + "="*60)
     print("RENOMEADOR INTELIGENTE DE COMPROVANTES - v6")
+    print(f"Pasta alvo: {args.folder}")
     print("="*60)
     
-    # Processar arquivos na pasta atual
-    renomear_arquivos_na_pasta()
+    renomear_arquivos_na_pasta(args.folder)
 
 
 if __name__ == "__main__":
